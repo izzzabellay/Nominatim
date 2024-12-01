@@ -75,6 +75,9 @@ def handle_threaded_sql_statements(pool, fd, analyzer):
             lines = 0
 
 
+
+
+
 def add_tiger_data(data_dir, config, threads, tokenizer):
     """ Import tiger data from directory or tar file `data dir`.
     """
