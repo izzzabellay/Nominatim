@@ -1,20 +1,17 @@
 name: CI Tests
 
-on: 
-  workflow_dispatch:
-  push:
-  pull_request:
+on: [ push, pull_request ]
 
 jobs:
     create-archive:
         runs-on: ubuntu-latest
 
         steps:
-            - uses: actions/checkout@v2
+            - uses: actions/checkout@v4
               with:
                 submodules: true
 
-            - uses: actions/cache@v3
+            - uses: actions/cache@v4
               with:
                   path: |
                      data/country_osm_grid.sql.gz
@@ -40,18 +37,18 @@ jobs:
         needs: create-archive
         strategy:
             matrix:
-                ubuntu: [18, 20]
+                flavour: ["ubuntu-20", "ubuntu-24"]
                 include:
-                    - ubuntu: 18
-                      postgresql: 9.5
-                      postgis: 2.5
-                      pytest: pytest
-                      php: 7.2
-                    - ubuntu: 20
-                      postgresql: 13
-                      postgis: 3
-                      pytest: py.test-3
-                      php: 7.4
+                    - flavour: ubuntu-20
+                      ubuntu: 20
+                      postgresql: 12
+                      lua: '5.1'
+                      dependencies: pip
+                    - flavour: ubuntu-24
+                      ubuntu: 24
+                      postgresql: 17
+                      lua: '5.3'
+                      dependencies: apt
 
         runs-on: ubuntu-${{ matrix.ubuntu }}.04
 
@@ -63,137 +60,66 @@ jobs:
             - name: Unpack Nominatim
               run: tar xf nominatim-src.tar.bz2
 
-            - name: Setup PHP
-              uses: shivammathur/setup-php@v2
-              with:
-                  php-version: ${{ matrix.php }}
-                  coverage: xdebug
-                  tools: phpunit, phpcs, composer
-
-            - uses: actions/setup-python@v2
-              with:
-                python-version: 3.6
-              if: matrix.ubuntu == 18
-
             - uses: ./Nominatim/.github/actions/setup-postgresql
               with:
                   postgresql-version: ${{ matrix.postgresql }}
-                  postgis-version: ${{ matrix.postgis }}
 
             - uses: ./Nominatim/.github/actions/build-nominatim
               with:
-                  ubuntu: ${{ matrix.ubuntu }}
+                  dependencies: ${{ matrix.dependencies }}
 
-            - name: Install test prerequsites
-              run: sudo apt-get install -y -qq pylint python3-pytest python3-behave python3-pytest-cov php-codecoverage
-              if: matrix.ubuntu == 20
+            - name: Compile osm2pgsql
+              run: |
+                  sudo apt-get install -y -qq libboost-system-dev libboost-filesystem-dev libexpat1-dev zlib1g-dev libbz2-dev libpq-dev libproj-dev libicu-dev liblua${LUA_VERSION}-dev lua-dkjson nlohmann-json3-dev 
+                  mkdir osm2pgsql-build
+                  cd osm2pgsql-build
+                  git clone https://github.com/osm2pgsql-dev/osm2pgsql
+                  mkdir build
+                  cd build
+                  cmake ../osm2pgsql
+                  make
+                  sudo make install
+                  cd ../..
+                  rm -rf osm2pgsql-build
+              if: matrix.ubuntu == '20'
+              env:
+                  LUA_VERSION: ${{ matrix.lua }}
 
-            - name: Install test prerequsites
-              run: pip3 install pylint==2.6.0 pytest pytest-cov behave==1.2.6
-              if: matrix.ubuntu == 18
+            - name: Install test prerequisites
+              run: ./venv/bin/pip install behave==1.2.6
 
-            - name: PHP linting
-              run: phpcs --report-width=120 .
-              working-directory: Nominatim
+            - name: Install test prerequisites (apt)
+              run: sudo apt-get install -y -qq python3-pytest python3-pytest-asyncio uvicorn python3-falcon python3-aiosqlite python3-pyosmium
+              if: matrix.dependencies == 'apt'
+
+            - name: Install test prerequisites (pip)
+              run: ./venv/bin/pip install pytest-asyncio falcon starlette asgi_lifespan aiosqlite osmium uvicorn
+              if: matrix.dependencies == 'pip'
+
+            - name: Install latest flake8
+              run: ./venv/bin/pip install -U flake8
 
             - name: Python linting
-              run: pylint nominatim
+              run: ../venv/bin/python -m flake8 src
               working-directory: Nominatim
 
-            - name: PHP unit tests
-              run: phpunit --coverage-clover ../../coverage-php.xml ./
-              working-directory: Nominatim/test/php
-              if: matrix.ubuntu == 20
+            - name: Install mypy and typechecking info
+              run: ./venv/bin/pip install -U mypy types-PyYAML types-jinja2 types-psutil types-requests types-ujson types-Pygments typing-extensions
+              if: matrix.dependencies == 'pip'
+
+            - name: Python static typechecking
+              run: ../venv/bin/python -m mypy --strict --python-version 3.8 src
+              working-directory: Nominatim
+              if: matrix.dependencies == 'pip'
 
             - name: Python unit tests
-              run: $PYTEST --cov=nominatim --cov-report=xml test/python
+              run: ../venv/bin/python -m pytest test/python
               working-directory: Nominatim
-              env:
-                PYTEST: ${{ matrix.pytest }}
 
             - name: BDD tests
               run: |
-                  mkdir cov
-                  behave -DREMOVE_TEMPLATE=1 -DBUILDDIR=$GITHUB_WORKSPACE/build --format=progress3 -DPHPCOV=./cov
-                  composer require phpunit/phpcov:7.0.2
-                  vendor/bin/phpcov merge --clover ../../coverage-bdd.xml ./cov
+                  ../../../venv/bin/python -m behave -DREMOVE_TEMPLATE=1 --format=progress3
               working-directory: Nominatim/test/bdd
-              if: matrix.ubuntu == 20
-
-            - name: BDD tests
-              run: |
-                  behave -DREMOVE_TEMPLATE=1 -DBUILDDIR=$GITHUB_WORKSPACE/build --format=progress3
-              working-directory: Nominatim/test/bdd
-              if: matrix.ubuntu == 18
-
-            - name: Upload coverage to Codecov
-              uses: codecov/codecov-action@v1
-              with:
-                files: ./Nominatim/coverage*.xml
-                directory: ./
-                name: codecov-umbrella
-                fail_ci_if_error: false
-                path_to_write_report: ./coverage/codecov_report.txt
-                verbose: true
-              if: matrix.ubuntu == 20
-
-
-    icu-test:
-        needs: create-archive
-        strategy:
-            matrix:
-                ubuntu: [20]
-                include:
-                    - ubuntu: 20
-                      postgresql: 13
-                      postgis: 3
-                      pytest: py.test-3
-                      php: 7.4
-
-        runs-on: ubuntu-${{ matrix.ubuntu }}.04
-
-        steps:
-            - uses: actions/download-artifact@v4
-              with:
-                  name: full-source
-
-            - name: Unpack Nominatim
-              run: tar xf nominatim-src.tar.bz2
-
-            - name: Setup PHP
-              uses: shivammathur/setup-php@v2
-              with:
-                  php-version: ${{ matrix.php }}
-                  coverage: xdebug
-                  tools: phpunit, phpcs, composer
-
-            - uses: actions/setup-python@v2
-              with:
-                python-version: 3.6
-              if: matrix.ubuntu == 18
-
-            - uses: ./Nominatim/.github/actions/setup-postgresql
-              with:
-                  postgresql-version: ${{ matrix.postgresql }}
-                  postgis-version: ${{ matrix.postgis }}
-
-            - uses: ./Nominatim/.github/actions/build-nominatim
-              with:
-                  ubuntu: ${{ matrix.ubuntu }}
-
-            - name: Install test prerequsites
-              run: sudo apt-get install -y -qq python3-behave
-              if: matrix.ubuntu == 20
-
-            - name: Install test prerequsites
-              run: pip3 install behave==1.2.6
-              if: matrix.ubuntu == 18
-
-            - name: BDD tests (icu tokenizer)
-              run: |
-                  behave -DREMOVE_TEMPLATE=1 -DBUILDDIR=$GITHUB_WORKSPACE/build -DTOKENIZER=icu --format=progress3
-              working-directory: Nominatim/test/bdd
-
 
     install:
         runs-on: ubuntu-latest
@@ -201,21 +127,16 @@ jobs:
 
         strategy:
             matrix:
-                name: [Ubuntu-18, Ubuntu-20, Centos-8]
+                name: [Ubuntu-22, Ubuntu-24]
                 include:
-                    - name: Ubuntu-18
-                      flavour: ubuntu
-                      image: "ubuntu:18.04"
-                      ubuntu: 18
-                      install_mode: install-nginx
-                    - name: Ubuntu-20
-                      flavour: ubuntu
-                      image: "ubuntu:20.04"
-                      ubuntu: 20
+                    - name: Ubuntu-22
+                      image: "ubuntu:22.04"
+                      ubuntu: 22
                       install_mode: install-apache
-                    - name: Centos-8
-                      flavour: centos
-                      image: "centos:8"
+                    - name: Ubuntu-24
+                      image: "ubuntu:24.04"
+                      ubuntu: 24
+                      install_mode: install-apache
 
         container:
             image: ${{ matrix.image }}
@@ -235,14 +156,6 @@ jobs:
                   apt-get install -y git sudo wget
                   ln -snf /usr/share/zoneinfo/$CONTAINER_TIMEZONE /etc/localtime && echo $CONTAINER_TIMEZONE > /etc/timezone
               shell: bash
-              if: matrix.flavour == 'ubuntu'
-
-            - name: Prepare container (CentOS)
-              run: |
-                  dnf update -y
-                  dnf install -y sudo glibc-langpack-en
-              shell: bash
-              if: matrix.flavour == 'centos'
 
             - name: Setup import user
               run: |
@@ -272,17 +185,32 @@ jobs:
             - name: Prepare import environment
               run: |
                   mv Nominatim/test/testdb/apidb-test-data.pbf test.pbf
+                  mv Nominatim/settings/flex-base.lua flex-base.lua
+                  mv Nominatim/settings/import-extratags.lua import-extratags.lua
+                  mv Nominatim/settings/taginfo.lua taginfo.lua
                   rm -rf Nominatim
                   mkdir data-env-reverse
               working-directory: /home/nominatim
 
-            - name: Prepare import environment (CentOS)
+            - name: Add nominatim to path
               run: |
-                  sudo ln -s /usr/local/bin/nominatim /usr/bin/nominatim
-                  echo NOMINATIM_DATABASE_WEBUSER="apache" > nominatim-project/.env
-                  cp nominatim-project/.env data-env-reverse/.env
+                sudo ln -s /home/nominatim/nominatim-venv/bin/nominatim /usr/local/bin/nominatim
+
+            - name: Need lua binary
+              run: |
+                sudo apt-get install -y lua5.4 lua-dkjson
+
+            - name: Print version
+              run: nominatim --version
+              working-directory: /home/nominatim/nominatim-project
+
+            - name: Print taginfo
+              run: lua taginfo.lua
               working-directory: /home/nominatim
-              if: matrix.flavour == 'centos'
+
+            - name: Collect host OS information
+              run: nominatim admin --collect-os-info
+              working-directory: /home/nominatim/nominatim-project
 
             - name: Import
               run: nominatim import --osm-file ../test.pbf
@@ -300,16 +228,18 @@ jobs:
               run: nominatim admin --warm
               working-directory: /home/nominatim/nominatim-project
 
-            - name: Prepare update (Ubuntu)
-              run: apt-get install -y python3-pip
-              shell: bash
-              if: matrix.flavour == 'ubuntu'
+            - name: Install osmium
+              run: |
+                  /home/nominatim/nominatim-venv/bin/pip install osmium
 
             - name: Run update
               run: |
-                  pip3 install --user osmium
                   nominatim replication --init
                   NOMINATIM_REPLICATION_MAX_DIFF=1 nominatim replication --once
+              working-directory: /home/nominatim/nominatim-project
+
+            - name: Clean up database
+              run: nominatim refresh --postcodes --word-tokens
               working-directory: /home/nominatim/nominatim-project
 
             - name: Run reverse-only import
@@ -318,6 +248,98 @@ jobs:
                   nominatim import --osm-file ../test.pbf --reverse-only --no-updates
               working-directory: /home/nominatim/data-env-reverse
 
-            - name: Check reverse import
+            - name: Check reverse-only import
               run: nominatim admin --check-database
               working-directory: /home/nominatim/data-env-reverse
+
+            - name: Clean up database (reverse-only import)
+              run: nominatim refresh --postcodes --word-tokens
+              working-directory: /home/nominatim/nominatim-project
+
+    install-no-superuser:
+      runs-on: ubuntu-24.04
+      needs: create-archive
+
+      steps:
+          - uses: actions/download-artifact@v4
+            with:
+                name: full-source
+
+          - name: Unpack Nominatim
+            run: tar xf nominatim-src.tar.bz2
+
+          - uses: ./Nominatim/.github/actions/setup-postgresql
+            with:
+                postgresql-version: 16
+
+          - uses: ./Nominatim/.github/actions/build-nominatim
+
+          - name: Prepare import environment
+            run: |
+                mv Nominatim/test/testdb/apidb-test-data.pbf test.pbf
+                rm -rf Nominatim
+
+          - name: Prepare Database
+            run: |
+                ./venv/bin/nominatim import --prepare-database
+
+          - name: Create import user
+            run: |
+                sudo -u postgres createuser osm-import
+                psql -d nominatim -c "ALTER USER \"osm-import\" WITH PASSWORD 'osm-import'"
+                psql -d nominatim -c 'GRANT CREATE ON SCHEMA public TO "osm-import"'
+
+          - name: Run import
+            run: |
+                NOMINATIM_DATABASE_DSN="pgsql:host=127.0.0.1;dbname=nominatim;user=osm-import;password=osm-import" ./venv/bin/nominatim import --continue import-from-file --osm-file test.pbf
+
+          - name: Check full import
+            run: ./venv/bin/nominatim admin --check-database
+
+    migrate:
+      runs-on: ubuntu-24.04
+      needs: create-archive
+
+      steps:
+          - uses: actions/download-artifact@v4
+            with:
+                name: full-source
+
+          - name: Unpack Nominatim
+            run: tar xf nominatim-src.tar.bz2
+
+          - uses: ./Nominatim/.github/actions/setup-postgresql
+            with:
+                postgresql-version: 17
+
+          - name: Install Python dependencies
+            run: |
+              sudo apt-get install --no-install-recommends virtualenv osm2pgsql
+
+          - name: Install Nominatim master version
+            run: |
+              virtualenv master
+              cd Nominatim
+              ../master/bin/pip install packaging/nominatim-db
+
+          - name: Install Nominatim from pypi
+            run: |
+              virtualenv release
+              ./release/bin/pip install nominatim-db
+
+          - name: Import Nominatim database using release
+            run: |
+              ./release/bin/nominatim import --osm-file Nominatim/test/testdb/apidb-test-data.pbf
+              ./release/bin/nominatim add-data --file Nominatim/test/testdb/additional_api_test.data.osm
+
+          - name: Migrate to master version
+            run: |
+              ./master/bin/nominatim admin --migrate
+              ./release/bin/nominatim add-data --file Nominatim/test/testdb/additional_api_test.data.osm
+
+    codespell:
+      runs-on: ubuntu-latest
+      steps:
+          - uses: codespell-project/actions-codespell@v2
+            with:
+                only_warn: 1
